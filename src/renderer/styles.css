@@ -154,7 +154,12 @@ html, body {
 .recent-item .recent-dir { display: block; font-size: 10.5px; color: var(--fg-faint); }
 
 .side-foot { padding: 9px 14px 11px; border-top: 1px solid var(--line); }
-.cache-info { font-size: 11px; color: var(--fg-faint); margin-bottom: 5px; }
+.foot-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.cache-info { font-size: 11px; color: var(--fg-faint); }
+.app-version {
+  font-size: 11px; font-weight: 650; color: var(--fg-faint);
+  font-variant-numeric: tabular-nums; letter-spacing: .3px;
+}
 .side-foot-btns { display: flex; gap: 12px; }
 
 .deck-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }

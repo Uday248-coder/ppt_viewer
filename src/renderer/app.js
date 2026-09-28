@@ -18,6 +18,7 @@ const el = {
   rootList: $('root-list'),
   recentList: $('recent-list'),
   cacheInfo: $('cache-info'),
+  appVersion: $('app-version'),
   emptyState: $('empty-state'),
   enginePill: $('engine-pill'),
 
@@ -316,10 +317,16 @@ function renderDeckList() {
   }
 }
 
+function showAppVersion(v) {
+  el.appVersion.textContent = v ? `v${v}` : 'v—';
+  el.appVersion.title = v ? `PPT Viewer ${v}` : '';
+}
+
 async function refreshInfo() {
   const info = await api.app.info();
   state.roots = info.roots || [];
   state.recents = info.recents || [];
+  showAppVersion(info.version);
   renderRoots();
   renderRecents();
   el.cacheInfo.textContent = `Cache: ${fmtBytes(info.cacheBytes)}`;
@@ -1012,6 +1019,7 @@ function bind() {
     }
     renderRoots();
     renderRecents();
+    showAppVersion(info.version);
     el.cacheInfo.textContent = `Cache: ${fmtBytes(info.cacheBytes)}`;
     showEmpty(state.roots.length === 0);
     if (state.roots.length) await rescan({ quiet: true });
