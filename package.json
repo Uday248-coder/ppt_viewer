@@ -1,0 +1,57 @@
+{
+  "name": "ppt-viewer",
+  "productName": "PPT Viewer",
+  "version": "1.0.0",
+  "description": "Standalone offline PowerPoint deck viewer",
+  "main": "src/main/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "cache": "electron . --warm-cache",
+    "dist": "electron-builder --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "local.pptviewer",
+    "productName": "PPT Viewer",
+    "asar": true,
+    "asarUnpack": [
+      "src/worker/**"
+    ],
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PPT Viewer",
+      "menuCategory": false,
+      "runAfterFinish": true
+    }
+  }
+}

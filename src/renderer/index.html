@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src pptv: data: blob:; font-src 'self'; connect-src 'none'" />
+  <title>PPT Viewer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ===================== LIBRARY ===================== -->
+    <section id="view-library" class="view is-active">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">P</span>
+          <span class="brand-name">PPT Viewer</span>
+        </div>
+        <div class="search-wrap">
+          <input id="search" type="search" placeholder="Search decks…" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="topbar-actions">
+          <span id="engine-pill" class="pill pill-wait" title="Rendering engine">starting…</span>
+          <button id="btn-rescan" class="btn" title="Rescan library folders">Rescan</button>
+          <button id="btn-add-folder" class="btn btn-primary" title="Add a folder to scan">Add folder</button>
+        </div>
+      </header>
+
+      <div class="library-body">
+        <aside class="sidebar">
+          <div class="side-head">
+            <span>Folders</span>
+          </div>
+          <ul id="root-list" class="root-list"></ul>
+          <div class="side-head side-head--spaced"><span>Recents</span></div>
+          <ul id="recent-list" class="recent-list"></ul>
+          <div class="side-foot">
+            <div id="cache-info" class="cache-info">Cache: —</div>
+            <div class="side-foot-btns">
+              <button id="btn-prune" class="linkbtn" title="Delete cached slides for decks that no longer exist">Prune</button>
+              <button id="btn-clear-cache" class="linkbtn" title="Delete all cached slide images">Clear cache</button>
+            </div>
+          </div>
+        </aside>
+
+        <main class="deck-pane">
+          <div class="deck-pane-head">
+            <div id="deck-count" class="deck-count">No folders added</div>
+            <div class="sort-wrap">
+              <label for="sort">Sort</label>
+              <select id="sort">
+                <option value="name">Name</option>
+                <option value="date">Last modified</option>
+                <option value="size">File size</option>
+              </select>
+            </div>
+          </div>
+          <div id="deck-list" class="deck-list"></div>
+        </main>
+      </div>
+
+      <div id="empty-state" class="empty-state">
+        <div class="empty-card">
+          <div class="empty-icon">▤</div>
+          <h1>Point me at your presentations</h1>
+          <p>Choose a folder and I'll find every <code>.ppt</code>, <code>.pptx</code> and <code>.ppsx</code> inside it — including subfolders. Everything stays on this machine.</p>
+          <button id="btn-add-folder-2" class="btn btn-primary btn-lg">Choose folder…</button>
+          <p class="empty-hint">Or drop a folder anywhere on this window</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== VIEWER ===================== -->
+    <section id="view-viewer" class="view">
+      <header class="topbar">
+        <button id="btn-back" class="btn btn-icon" title="Back to library (Esc)">‹</button>
+        <div class="deck-title">
+          <span id="viewer-title">Deck</span>
+          <span id="viewer-sub" class="deck-sub"></span>
+        </div>
+        <div class="topbar-actions">
+          <button id="btn-grid" class="btn" title="All slides (G)">Slides</button>
+          <button id="btn-notes" class="btn" title="Toggle speaker notes (N)">Notes</button>
+          <button id="btn-cache" class="btn" title="Render every slide to cache for instant offline reopening">Cache deck</button>
+          <button id="btn-pdf" class="btn" title="Export this deck as PDF">PDF</button>
+          <button id="btn-present" class="btn btn-primary" title="Start slideshow (F5)">Present</button>
+        </div>
+      </header>
+
+      <div class="viewer-body">
+        <div id="stage" class="stage">
+          <div id="slide-wrap" class="slide-wrap">
+            <img id="slide-img" class="slide-img" alt="" draggable="false" />
+          </div>
+          <div id="slide-spinner" class="slide-spinner" hidden><div class="spinner"></div></div>
+          <div id="zoom-badge" class="zoom-badge" hidden>100%</div>
+          <button id="btn-zoom-reset" class="zoom-reset" hidden title="Reset zoom (0)">Reset zoom</button>
+        </div>
+
+        <aside id="notes-panel" class="notes-panel">
+          <div class="notes-head">
+            <span>Speaker notes</span>
+            <span id="notes-slide-no" class="notes-no"></span>
+          </div>
+          <div id="notes-body" class="notes-body"></div>
+        </aside>
+      </div>
+
+      <footer class="filmstrip-wrap">
+        <button id="btn-prev" class="nav-btn" title="Previous slide (←)">‹</button>
+        <div id="filmstrip" class="filmstrip"></div>
+        <button id="btn-next" class="nav-btn" title="Next slide (→)">›</button>
+        <div class="counter"><span id="slide-no">0</span><span class="counter-sep">/</span><span id="slide-total">0</span></div>
+      </footer>
+    </section>
+
+    <!-- ===================== GRID OVERLAY ===================== -->
+    <div id="grid-overlay" class="overlay" hidden>
+      <div class="overlay-head">
+        <h2>All slides</h2>
+        <button id="btn-grid-close" class="btn">Close (Esc)</button>
+      </div>
+      <div id="grid-body" class="grid-body"></div>
+    </div>
+
+    <!-- ===================== PRESENT MODE ===================== -->
+    <div id="present" class="present" hidden>
+      <div id="present-stage" class="present-stage">
+        <img id="present-img" class="present-img" alt="" draggable="false" />
+      </div>
+      <div id="present-notes" class="present-notes" hidden></div>
+      <div id="present-bar" class="present-bar">
+        <div class="present-progress"><div id="present-progress-fill" class="present-progress-fill"></div></div>
+        <div class="present-meta">
+          <span id="present-title"></span>
+          <span id="present-counter"></span>
+        </div>
+        <div class="present-btns">
+          <button id="p-prev" class="pbtn" title="Previous (←)">‹</button>
+          <button id="p-grid" class="pbtn" title="All slides (G)">▦</button>
+          <button id="p-notes" class="pbtn" title="Notes (N)">N</button>
+          <button id="p-exit" class="pbtn" title="Exit (Esc)">✕</button>
+          <button id="p-next" class="pbtn" title="Next (→)">›</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== TOASTS / BUSY ===================== -->
+    <div id="toasts" class="toasts"></div>
+    <div id="busy" class="busy" hidden>
+      <div class="busy-card">
+        <div class="spinner spinner-lg"></div>
+        <div id="busy-text">Working…</div>
+        <div id="busy-sub" class="busy-sub"></div>
+        <div id="busy-bar" class="busy-bar" hidden><div id="busy-bar-fill" class="busy-bar-fill"></div></div>
+      </div>
+    </div>
+
+    <div id="drop-veil" class="drop-veil" hidden><div>Drop a folder or deck to add it</div></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
