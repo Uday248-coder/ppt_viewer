@@ -2,12 +2,26 @@
   "name": "ppt-viewer",
   "productName": "PPT Viewer",
   "version": "1.0.0",
-  "description": "Standalone offline PowerPoint deck viewer",
+  "description": "Standalone offline PowerPoint deck viewer for Windows",
+  "author": "Uday248-coder",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Uday248-coder/ppt_viewer.git"
+  },
+  "keywords": [
+    "powerpoint",
+    "ppt",
+    "pptx",
+    "viewer",
+    "offline",
+    "electron",
+    "windows"
+  ],
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
     "start": "electron .",
-    "cache": "electron . --warm-cache",
     "dist": "electron-builder --win --x64"
   },
   "devDependencies": {

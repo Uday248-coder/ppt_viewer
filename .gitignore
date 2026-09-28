@@ -3,3 +3,14 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# Never commit credentials. This app does not use env files or secrets today;
+# these rules are here so a future change cannot leak one by accident.
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json

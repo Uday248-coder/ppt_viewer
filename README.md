@@ -7,6 +7,8 @@ sign-in.
 
 Built for one person on one machine. Nothing leaves your PC.
 
+MIT licensed — see [LICENSE](LICENSE).
+
 ---
 
 ## Your question first: will an expired Microsoft subscription break this?
