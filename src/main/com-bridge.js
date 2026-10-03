@@ -133,7 +133,12 @@ class ComBridge extends EventEmitter {
       let msg;
       try { msg = JSON.parse(line.slice(SENTINEL.length)); } catch { continue; }
       const entry = this.pending.get(msg.id);
-      if (!entry) continue;
+      if (!entry) {
+        // id 0 is the worker's unsolicited progress channel; it deliberately
+        // never matches a request, so anything arriving here is an event.
+        if (msg.id === 0 && msg.event) this.emit('worker-event', msg.event);
+        continue;
+      }
       this.pending.delete(msg.id);
       clearTimeout(entry.timer);
       if (msg.ok) entry.resolve(msg.result);
@@ -216,6 +221,19 @@ class ComBridge extends EventEmitter {
     } catch { /* worker will be killed below regardless */ }
     try { p.kill(); } catch { }
     this.proc = null;
+    this._failAllPending('Render worker stopped');
+  }
+
+  /**
+   * Synchronous last resort, for when the app is being torn down and there is
+   * no longer time to negotiate a graceful shutdown.
+   */
+  killNow() {
+    this.stopping = true;
+    if (this.proc) {
+      try { this.proc.kill(); } catch { }
+      this.proc = null;
+    }
     this._failAllPending('Render worker stopped');
   }
 }

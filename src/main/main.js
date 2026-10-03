@@ -2,13 +2,16 @@
 
 const { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, nativeTheme } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const fsp = require('fs/promises');
+const { Readable } = require('stream');
 
 const { ComBridge } = require('./com-bridge');
-const { SlideCache, KINDS, THUMB_W, THUMB_H, FULL_W, FULL_H } = require('./cache');
+const { SlideCache, KINDS, RENDER_VERSION, THUMB_W, FULL_W } = require('./cache');
 const { LibraryScanner } = require('./library');
 const { Settings } = require('./settings');
 const { DeckService } = require('./deck-service');
+const presenter = require('./presenter');
 
 const IMAGE_SCHEME = 'pptv';
 
@@ -20,6 +23,27 @@ protocol.registerSchemesAsPrivileged([
     privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: false },
   },
 ]);
+
+// Chromium's own mapping is unreliable for a custom scheme, and a media element
+// refuses to play a response it cannot classify.
+const MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.apng': 'image/apng',
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.flac': 'audio/flac',
+};
 
 let win = null;
 let settings = null;
@@ -33,9 +57,17 @@ function slideUrl(key, kind, index) {
   return `${IMAGE_SCHEME}://slide/${key}/${kind}/slide-${String(index).padStart(4, '0')}.png`;
 }
 
+function mediaUrl(key, name) {
+  return `${IMAGE_SCHEME}://media/${key}/media/${encodeURIComponent(name)}`;
+}
+
 function deckPayload(res) {
   const info = res.info;
   const aspect = info.heightPt ? info.widthPt / info.heightPt : 4 / 3;
+  const mediaBySlide = {};
+  for (const [index, items] of Object.entries(info.mediaSlides || {})) {
+    mediaBySlide[index] = items.map((it) => ({ ...it, url: mediaUrl(res.key, it.file) }));
+  }
   return {
     path: res.path,
     key: res.key,
@@ -47,6 +79,10 @@ function deckPayload(res) {
     heightPt: info.heightPt,
     aspect,
     cached: res.cached ? res.cached.level : 'none',
+    thumbSize: info.thumbSize || { long: THUMB_W },
+    fullSize: info.fullSize || { long: FULL_W },
+    media: mediaBySlide,
+    mediaFiles: info.mediaFiles || [],
     slides: (info.slides || []).map((s) => ({
       index: s.index,
       title: s.title || '',
@@ -77,6 +113,9 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      // A presenter deck is expected to make noise without being asked first,
+      // exactly as it would in PowerPoint's own slideshow.
+      autoplayPolicy: 'no-user-gesture-required',
     },
   });
 
@@ -104,6 +143,11 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+/** A byte range of a file as a web stream, so large media is never buffered. */
+function fileStream(file, start, length) {
+  return Readable.toWeb(fs.createReadStream(file, { start, end: start + length - 1 }));
+}
+
 function wireIpc() {
   ipcMain.handle('app:info', async () => {
     return {
@@ -128,6 +172,8 @@ function wireIpc() {
       ms: res.ms,
       errors: res.errors.slice(0, 20),
       cancelled: res.cancelled,
+      repos: res.repos,
+      tree: res.tree,
       decks: res.files.map((f) => ({
         ...f,
         key: SlideCache.keyFor(f.path, { size: f.size, mtimeMs: f.mtimeMs }),
@@ -190,6 +236,10 @@ function wireIpc() {
     return r;
   });
 
+  ipcMain.handle('deck:prefill', async (_e, p) => decks.prefill(p));
+
+  ipcMain.handle('deck:stopPrefill', async () => ({ wasRunning: decks.stopPrefill() }));
+
   ipcMain.handle('deck:status', async (_e, p) => {
     const st = await fsp.stat(p);
     const key = SlideCache.keyFor(p, st);
@@ -233,6 +283,38 @@ function wireIpc() {
 
   ipcMain.handle('win:isFullScreen', async () => (win ? win.isFullScreen() : false));
 
+  // --- presenter ----------------------------------------------------------
+  ipcMain.handle('presenter:open', async () => presenter.openPresenter());
+
+  ipcMain.handle('presenter:close', async () => {
+    presenter.closePresenter();
+    return true;
+  });
+
+  ipcMain.handle('presenter:isOpen', async () => presenter.isOpen());
+
+  ipcMain.handle('presenter:state', async (_e, s) => {
+    presenter.pushState(s);
+    return true;
+  });
+
+  ipcMain.handle('presenter:tick', async (_e, payload) => {
+    presenter.pushTick(payload);
+    return true;
+  });
+
+  // Navigation requested from the presenter window. It is forwarded rather than
+  // applied so there is exactly one slide cursor for the whole app.
+  ipcMain.handle('presenter:nav', async (_e, delta) => {
+    send('deck:navigate', { delta: Number(delta) || 0 });
+    return true;
+  });
+
+  ipcMain.handle('presenter:resetTimer', async () => {
+    send('presenter:reset-timer', {});
+    return true;
+  });
+
   ipcMain.handle('win:openExternal', async (_e, url) => {
     // Never navigate to arbitrary URLs; only hand http(s) to the OS browser.
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
@@ -264,18 +346,63 @@ app.whenReady().then(async () => {
   com.on('worker-restarting', () => send('engine:status', { restarting: true }));
   com.on('worker-exit', (info) => send('engine:status', { restarting: false, exit: info }));
   decks.on('deck-opening', (d) => send('deck:opening', d));
+  decks.on('render-progress', (d) => send('deck:progress', { path: decks.current?.path, phase: 'render', ...d }));
 
-  // Serve cached slide images, refusing anything outside the cache root.
+  // Serve cached slide images and media, refusing anything outside the cache
+  // root. Range requests are honoured because a media element will not scrub a
+  // video it cannot seek in.
   protocol.handle(IMAGE_SCHEME, async (request) => {
+    let target = null;
     try {
       const url = new URL(request.url);
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '');
-      const target = path.resolve(cache.root, rel);
+      target = path.resolve(cache.root, rel);
       const rootResolved = path.resolve(cache.root);
       if (target !== rootResolved && !target.startsWith(rootResolved + path.sep)) {
         return new Response('Forbidden', { status: 403 });
       }
-      return await net.fetch(`file://${target.replace(/\\/g, '/')}`);
+
+      const stat = await fsp.stat(target);
+      if (!stat.isFile()) return new Response('Not found', { status: 404 });
+
+      const type = MIME[path.extname(target).toLowerCase()] || 'application/octet-stream';
+      const base = { 'Content-Type': type, 'Accept-Ranges': 'bytes' };
+
+      if (request.method === 'HEAD') {
+        return new Response(null, { headers: { ...base, 'Content-Length': String(stat.size) } });
+      }
+
+      const range = request.headers.get('Range');
+      const match = range ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null;
+      if (match) {
+        let start = match[1] === '' ? null : Number(match[1]);
+        let end = match[2] === '' ? null : Number(match[2]);
+        if (start === null) {
+          // A suffix range asks for the last N bytes.
+          start = end === null ? 0 : Math.max(0, stat.size - end);
+          end = stat.size - 1;
+        } else {
+          if (end === null || end >= stat.size) end = stat.size - 1;
+        }
+        if (start > end || start >= stat.size) {
+          return new Response(null, {
+            status: 416,
+            headers: { ...base, 'Content-Range': `bytes */${stat.size}` },
+          });
+        }
+        return new Response(fileStream(target, start, end - start + 1), {
+          status: 206,
+          headers: {
+            ...base,
+            'Content-Length': String(end - start + 1),
+            'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+          },
+        });
+      }
+
+      return new Response(fileStream(target, 0, stat.size), {
+        headers: { ...base, 'Content-Length': String(stat.size) },
+      });
     } catch (e) {
       return new Response(`Not found: ${e.message}`, { status: 404 });
     }
@@ -293,10 +420,32 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
-  try { await decks?.shutdown(); } catch { }
+  try { presenter.disposePresenter(); } catch { }
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', async () => {
-  try { await settings?.save(); } catch { }
+/**
+ * Quitting has to release PowerPoint properly.
+ *
+ * The render worker holds the PowerPoint COM object, so simply exiting leaves
+ * POWERPNT.EXE running with a deck open. Quitting therefore pauses once, asks
+ * the worker to shut down, and only then exits - with a short fuse so a wedged
+ * COM call can never make the app unquittable.
+ */
+let quitting = false;
+app.on('before-quit', (event) => {
+  if (quitting) return;
+  quitting = true;
+  event.preventDefault();
+
+  const fuse = setTimeout(() => {
+    try { com?.killNow(); } catch { }
+    app.exit(0);
+  }, 2500);
+  (async () => {
+    try { await decks?.shutdown(); } catch { }
+    try { await settings?.save(); } catch { }
+    clearTimeout(fuse);
+    app.exit(0);
+  })();
 });

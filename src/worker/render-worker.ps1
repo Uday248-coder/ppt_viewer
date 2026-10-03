@@ -31,6 +31,16 @@ $script:ppAlertsNone      = 1
 $script:ppPlaceholderBody = 2
 $script:ppSaveAsPDF       = 32
 
+# Media extensions worth pulling out of the package. Images are excluded on
+# purpose: a large deck has thousands of jpegs under ppt/media and copying them
+# would dwarf the payload. Animated GIFs are included because PowerPoint bakes
+# only the first frame into an exported still.
+$script:MediaExts = @('.mp4', '.m4v', '.mov', '.avi', '.wmv', '.mpg', '.mpeg', '.m4a', '.mp3', '.wav', '.aif', '.aiff', '.gif')
+
+# Loaded lazily for the media-unpacking command; harmless when unavailable.
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+
 # ConvertFrom-Json yields PSCustomObject, where $o['name'] silently yields $null.
 # Always read fields through this accessor instead of index syntax.
 function Get-Field {
@@ -51,6 +61,63 @@ function Send-Response {
   } catch {
     $script:Out.WriteLine($script:Sentinel + '{"id":0,"ok":false,"error":"serialisation failed"}')
     $script:Out.Flush()
+  }
+}
+
+# Unsolicited progress, so a long batch can report itself without waiting for
+# the single reply that ends it. Carries id 0, which never matches a request.
+function Send-Event {
+  param($Data)
+  try {
+    $json = @{ id = 0; ok = $true; event = $Data } | ConvertTo-Json -Depth 8 -Compress
+    $script:Out.WriteLine($script:Sentinel + $json)
+    $script:Out.Flush()
+  } catch { }
+}
+
+# --- export sizing -----------------------------------------------------------
+#
+# PowerPoint's Export takes an explicit width AND height, so passing a fixed
+# 1920x1080 silently stretches every deck that is not 16:9 - a 4:3 deck comes
+# back visibly squashed. Callers now pass only the long edge and the deck's own
+# PageSetup decides the other dimension, which makes distortion impossible.
+function Get-ExportSize {
+  param($Pres, [int]$Long)
+
+  if ($Long -le 0) { $Long = 1920 }
+
+  $w = 0.0; $h = 0.0
+  try {
+    $w = [double]$Pres.PageSetup.SlideWidth
+    $h = [double]$Pres.PageSetup.SlideHeight
+  } catch { }
+  if ($w -le 0 -or $h -le 0) { $w = 4.0; $h = 3.0 }
+
+  $width = 0; $height = 0
+  if ($w -ge $h) {
+    $width  = $Long
+    $height = [int][Math]::Round($Long * $h / $w)
+  } else {
+    $width  = [int][Math]::Round($Long * $w / $h)
+    $height = $Long
+  }
+  if ($width -lt 1) { $width = 1 }
+  if ($height -lt 1) { $height = 1 }
+
+  return [ordered]@{ width = $width; height = $height }
+}
+
+function Read-ZipText {
+  param($Entry)
+  try {
+    $s = $Entry.Open()
+    $r = New-Object System.IO.StreamReader($s, [System.Text.Encoding]::UTF8, $true)
+    $t = $r.ReadToEnd()
+    $r.Dispose()
+    $s.Dispose()
+    return $t
+  } catch {
+    return ''
   }
 }
 
@@ -220,10 +287,10 @@ function Invoke-PpvRequest {
     if ($null -eq $script:Pres) { throw 'No presentation is open' }
     $dir = [string](Get-Field $data 'dir' '')
     if ([string]::IsNullOrWhiteSpace($dir)) { throw 'exportDir: missing dir' }
-    $w = [int](Get-Field $data 'width' 0);  if ($w -le 0) { $w = 1920 }
-    $h = [int](Get-Field $data 'height' 0); if ($h -le 0) { $h = 1080 }
+    $long = [int](Get-Field $data 'long' 1920)
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    $script:Pres.Export($dir, 'PNG', $w, $h)
+    $size = Get-ExportSize $script:Pres $long
+    $script:Pres.Export($dir, 'PNG', $size.width, $size.height)
     $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.PNG' -ErrorAction SilentlyContinue)
     $out = New-Object System.Collections.ArrayList
     foreach ($f in $files) {
@@ -233,7 +300,7 @@ function Invoke-PpvRequest {
       if ($f.BaseName -match '(\d+)\s*$') { $n = [int]$Matches[1] }
       [void]$out.Add([ordered]@{ index = $n; file = $f.FullName })
     }
-    return @{ ok = $true; result = @{ dir = $dir; files = $out.ToArray() } }
+    return @{ ok = $true; result = @{ dir = $dir; files = $out.ToArray(); width = $size.width; height = $size.height } }
   }
 
   if ($cmd -eq 'exportSlide') {
@@ -242,11 +309,144 @@ function Invoke-PpvRequest {
     if ([string]::IsNullOrWhiteSpace($file)) { throw 'exportSlide: missing file' }
     $idx = [int](Get-Field $data 'index' 0)
     if ($idx -lt 1) { throw 'exportSlide: bad index' }
-    $w = [int](Get-Field $data 'width' 0);  if ($w -le 0) { $w = 1920 }
-    $h = [int](Get-Field $data 'height' 0); if ($h -le 0) { $h = 1080 }
+    $long = [int](Get-Field $data 'long' 1920)
+    # PowerPoint refuses to export into a directory that does not exist yet, and
+    # reports it as a confusing "couldn't find <file>" error.
+    $parent = [System.IO.Path]::GetDirectoryName($file)
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+      New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $size = Get-ExportSize $script:Pres $long
     $slide = $script:Pres.Slides.Item($idx)
-    try { $slide.Export($file, 'PNG', $w, $h) } finally { Release-Com $slide }
-    return @{ ok = $true; result = @{ index = $idx; file = $file } }
+    try { $slide.Export($file, 'PNG', $size.width, $size.height) } finally { Release-Com $slide }
+    return @{ ok = $true; result = @{ index = $idx; file = $file; width = $size.width; height = $size.height } }
+  }
+
+  if ($cmd -eq 'exportSlides') {
+    # Several slides in one round trip. Issuing exportSlide per slide means N
+    # protocol waits, and every one of them sits in front of the user.
+    if ($null -eq $script:Pres) { throw 'No presentation is open' }
+    $dir = [string](Get-Field $data 'dir' '')
+    if ([string]::IsNullOrWhiteSpace($dir)) { throw 'exportSlides: missing dir' }
+    $long = [int](Get-Field $data 'long' 1920)
+    $indices = @(Get-Field $data 'indices' @())
+    if ($indices.Count -eq 0) { throw 'exportSlides: missing indices' }
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $size = Get-ExportSize $script:Pres $long
+    $out = New-Object System.Collections.ArrayList
+    $done = 0
+    foreach ($raw in $indices) {
+      $idx = [int]$raw
+      if ($idx -lt 1 -or $idx -gt $script:Pres.Slides.Count) { continue }
+      $file = Join-Path $dir ("s$idx.png")
+      $slide = $script:Pres.Slides.Item($idx)
+      try {
+        $slide.Export($file, 'PNG', $size.width, $size.height)
+        [void]$out.Add([ordered]@{ index = $idx; file = $file })
+      } finally { Release-Com $slide }
+      $done += 1
+      Send-Event @{ event = 'progress'; phase = 'slides'; done = $done; total = $indices.Count; index = $idx }
+    }
+    return @{ ok = $true; result = @{ dir = $dir; files = $out.ToArray(); width = $size.width; height = $size.height } }
+  }
+
+  if ($cmd -eq 'unpackMedia') {
+    # Streams media out of the OOXML package. Needs no PowerPoint at all, so a
+    # fully cached deck can still be opened with the engine unavailable.
+    $file = [string](Get-Field $data 'file' '')
+    $out  = [string](Get-Field $data 'outDir' '')
+    if ([string]::IsNullOrWhiteSpace($file)) { throw 'unpackMedia: missing file' }
+    if ([string]::IsNullOrWhiteSpace($out))  { throw 'unpackMedia: missing outDir' }
+    if (-not (Test-Path -LiteralPath $file)) { throw "File not found: $file" }
+    if (-not (Test-Path -LiteralPath $out)) { New-Item -ItemType Directory -Force -Path $out | Out-Null }
+    $root = (Resolve-Path -LiteralPath $out).Path.TrimEnd('\')
+
+    # PowerPoint takes an exclusive lock on any deck it has open, so the package
+    # cannot be read while the deck is being rendered. When that happens the
+    # caller asks for a throwaway copy and reads that instead.
+    $src = $file
+    $viaCopy = [string](Get-Field $data 'viaCopy' '')
+    if (-not [string]::IsNullOrWhiteSpace($viaCopy)) {
+      Copy-Item -LiteralPath $file -Destination $viaCopy -Force
+      $src = $viaCopy
+    }
+
+    function Resolve-InRoot {
+      param([string]$Relative)
+      $full = [System.IO.Path]::GetFullPath((Join-Path $root $Relative))
+      # A crafted package must not be able to write outside the cache.
+      if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+      $parent = [System.IO.Path]::GetDirectoryName($full)
+      if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+      }
+      return $full
+    }
+
+    $zip = $null
+    try { $zip = [System.IO.Compression.ZipFile]::OpenRead($src) }
+    catch {
+      $inner = ''
+      try { $inner = $_.Exception.InnerException.Message } catch { }
+      throw "Not a readable OOXML package: $src $inner"
+    }
+
+    $media = New-Object System.Collections.ArrayList
+    $slides = New-Object System.Collections.ArrayList
+    $scanned = 0
+    try {
+      # Slide file numbers do not follow display order, so the ordered slide list
+      # always has to come from presentation.xml.
+      foreach ($e in $zip.Entries) {
+        if ($e.FullName -eq 'ppt/presentation.xml' -or $e.FullName -eq 'ppt/_rels/presentation.xml.rels') {
+          $dest = Resolve-InRoot ("slides\_" + [System.IO.Path]::GetFileName($e.FullName))
+          if ($dest) { [IO.File]::WriteAllText($dest, (Read-ZipText $e), (New-Object System.Text.UTF8Encoding $false)) }
+        }
+      }
+
+      # Pass 1: playable media files only. A large deck has thousands of jpegs
+      # under ppt/media and copying them would dwarf everything else.
+      foreach ($e in $zip.Entries) {
+        if ($e.FullName -notmatch '^ppt/media/[^/]+$') { continue }
+        if ([string]::IsNullOrEmpty($e.Name)) { continue }
+        $ext = [System.IO.Path]::GetExtension($e.Name).ToLowerInvariant()
+        if ($script:MediaExts -notcontains $ext) { continue }
+        $dest = Resolve-InRoot ("media\" + $e.Name)
+        if (-not $dest) { continue }
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
+        [void]$media.Add([ordered]@{ name = $e.Name; ext = $ext; bytes = [int64]$e.Length })
+      }
+
+      # Pass 2: only the slides that actually reference playable media get their
+      # XML written out, which keeps a 300-slide deck down to a handful of files.
+      foreach ($e in $zip.Entries) {
+        if ($e.FullName -notmatch '^ppt/slides/_rels/slide(\d+)\.xml\.rels$') { continue }
+        $scanned += 1
+        $n = $Matches[1]
+        $rels = Read-ZipText $e
+        $want = $false
+        foreach ($m in [regex]::Matches($rels, 'Target="([^"]+)"')) {
+          $ext = [System.IO.Path]::GetExtension($m.Groups[1].Value).ToLowerInvariant()
+          if ($script:MediaExts -contains $ext) { $want = $true; break }
+        }
+        if (-not $want) { continue }
+
+        $destRels = Resolve-InRoot ("slides\slide$n.rels")
+        if ($destRels) { [IO.File]::WriteAllText($destRels, $rels, (New-Object System.Text.UTF8Encoding $false)) }
+
+        $xmlEntry = $zip.GetEntry("ppt/slides/slide$n.xml")
+        if ($null -ne $xmlEntry) {
+          $destXml = Resolve-InRoot ("slides\slide$n.xml")
+          if ($destXml) {
+            [IO.File]::WriteAllText($destXml, (Read-ZipText $xmlEntry), (New-Object System.Text.UTF8Encoding $false))
+          }
+        }
+        [void]$slides.Add([ordered]@{ part = "slide$n" })
+      }
+    } finally { $zip.Dispose() }
+
+    return @{ ok = $true; result = @{ media = $media.ToArray(); slides = $slides.ToArray(); scanned = $scanned } }
   }
 
   if ($cmd -eq 'exportPdf') {

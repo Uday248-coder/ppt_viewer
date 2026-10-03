@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src pptv: data:; style-src 'self'; script-src 'self'; font-src 'self';">
+<title>PPT Presenter</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="presenter-body">
+  <header class="pv-head">
+    <div class="pv-head-left">
+      <div class="pv-deck" id="pv-deck">No deck</div>
+      <div class="pv-sub" id="pv-sub">—</div>
+    </div>
+    <div class="pv-head-right">
+      <div class="pv-clock" id="pv-clock">--:--</div>
+      <div class="pv-timer-row">
+        <span class="pv-timer" id="pv-timer">0:00</span>
+        <button class="pv-mini" id="pv-reset" title="Reset the elapsed timer">Reset</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="pv-progress"><div class="pv-progress-fill" id="pv-progress-fill"></div></div>
+
+  <main class="pv-main">
+    <section class="pv-pane pv-current">
+      <div class="pv-pane-label">
+        <span>On screen</span>
+        <span class="pv-nav">
+          <button class="pv-mini" id="pv-prev" title="Previous slide">‹</button>
+          <button class="pv-mini" id="pv-next" title="Next slide">›</button>
+        </span>
+      </div>
+      <div class="pv-frame" id="pv-frame">
+        <img id="pv-cur" alt="">
+        <div class="pv-empty" id="pv-empty">Press F5 in the deck window to start</div>
+      </div>
+      <div class="pv-caption" id="pv-caption"></div>
+    </section>
+
+    <section class="pv-pane pv-side">
+      <div class="pv-pane-label"><span>Up next</span></div>
+      <div class="pv-frame pv-frame-next" id="pv-next-frame">
+        <img id="pv-next-img" alt="">
+        <div class="pv-empty" id="pv-next-empty">End of deck</div>
+      </div>
+
+      <div class="pv-pane-label pv-notes-label">
+        <span>Speaker notes</span>
+        <span class="pv-notes-count" id="pv-notes-count"></span>
+      </div>
+      <div class="pv-notes" id="pv-notes">No notes for this slide.</div>
+    </section>
+  </main>
+
+  <footer class="pv-foot">
+    <span class="pv-hint">← → navigate · N notes · Esc closes presenter · F5 audience fullscreen</span>
+  </footer>
+
+  <script src="presenter.js"></script>
+</body>
+</html>

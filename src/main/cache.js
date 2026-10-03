@@ -5,19 +5,29 @@ const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 
+// Only the long edge is fixed. The other dimension follows each deck's own
+// aspect ratio, so a 4:3 deck renders as 1920x1440 instead of being squashed.
 const THUMB_W = 480;
-const THUMB_H = 270;
 const FULL_W = 1920;
-const FULL_H = 1080;
 
 const KINDS = { THUMB: 'thumb', FULL: 'full' };
 
 /**
+ * Bumped whenever a change makes previously rendered slides wrong rather than
+ * merely stale. v2 raised it because renders used to force a 1920x1080 export
+ * regardless of the deck's own shape, which silently squashed every 4:3 deck.
+ * Folding this into the key orphans the old entries, so Prune can drop them and
+ * each deck re-renders itself correctly the next time it is opened.
+ */
+const RENDER_VERSION = 2;
+
+/**
  * Content-addressed slide cache.
  *
- * A deck's identity is derived from its path, byte size and mtime, so editing a
- * deck in PowerPoint automatically invalidates its cache without any explicit
- * "refresh" step and without ever hashing multi-megabyte files.
+ * A deck's identity is derived from its render version, path, byte size and
+ * mtime, so editing a deck in PowerPoint automatically invalidates its cache
+ * without any explicit "refresh" step and without ever hashing multi-megabyte
+ * files.
  */
 class SlideCache {
   constructor(root) {
@@ -31,6 +41,7 @@ class SlideCache {
 
   static keyFor(absPath, stat) {
     const h = crypto.createHash('sha1');
+    h.update(`v${RENDER_VERSION}|`);
     h.update(path.resolve(absPath).toLowerCase());
     h.update('|');
     h.update(String(stat.size));
@@ -49,6 +60,15 @@ class SlideCache {
 
   slidePath(key, kind, index) {
     return path.join(this.deckDir(key), this.kindDirs[kind], `slide-${String(index).padStart(4, '0')}.png`);
+  }
+
+  /** Playable media lives beside the renders so it is covered by the same key. */
+  mediaDir(key) {
+    return path.join(this.deckDir(key), 'media');
+  }
+
+  mediaPath(key, name) {
+    return path.join(this.mediaDir(key), path.basename(name));
   }
 
   async ensureDeckDir(key) {
@@ -136,6 +156,23 @@ class SlideCache {
     }
   }
 
+  /**
+   * True when every media file the deck references is still on disk. A deck
+   * whose media was half-extracted must not advertise video it cannot play.
+   */
+  async mediaReady(key, files) {
+    if (!files || !files.length) return true;
+    for (const f of files) {
+      try {
+        const st = await fsp.stat(this.mediaPath(key, f.name));
+        if (st.size !== f.bytes) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+
   async removeDeck(key) {
     await fsp.rm(this.deckDir(key), { recursive: true, force: true });
   }
@@ -209,10 +246,9 @@ async function dirSize(dir) {
 
 module.exports = {
   SlideCache,
+  RENDER_VERSION,
   THUMB_W,
-  THUMB_H,
   FULL_W,
-  FULL_H,
   KINDS,
   dirSize,
 };

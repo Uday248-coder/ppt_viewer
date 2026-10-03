@@ -15,6 +15,16 @@ contextBridge.exposeInMainWorld('pptv', {
       ipcRenderer.on('engine:status', h);
       return () => ipcRenderer.removeListener('engine:status', h);
     },
+    onNavigate: (cb) => {
+      const h = (_e, s) => cb(s);
+      ipcRenderer.on('deck:navigate', h);
+      return () => ipcRenderer.removeListener('deck:navigate', h);
+    },
+    onResetTimer: (cb) => {
+      const h = () => cb();
+      ipcRenderer.on('presenter:reset-timer', h);
+      return () => ipcRenderer.removeListener('presenter:reset-timer', h);
+    },
   },
 
   library: {
@@ -33,6 +43,8 @@ contextBridge.exposeInMainWorld('pptv', {
     ensureThumbs: (path) => ipcRenderer.invoke('deck:ensureThumbs', path),
     ensureSlides: (path, indices) => ipcRenderer.invoke('deck:ensureSlides', { path, indices }),
     cacheAll: (path) => ipcRenderer.invoke('deck:cacheAll', path),
+    prefill: (path) => ipcRenderer.invoke('deck:prefill', path),
+    stopPrefill: () => ipcRenderer.invoke('deck:stopPrefill'),
     status: (path) => ipcRenderer.invoke('deck:status', path),
     exportPdf: (path) => ipcRenderer.invoke('deck:exportPdf', path),
     onOpening: (cb) => {
@@ -51,5 +63,35 @@ contextBridge.exposeInMainWorld('pptv', {
     present: () => ipcRenderer.invoke('win:present'),
     exitPresent: () => ipcRenderer.invoke('win:exitPresent'),
     isFullScreen: () => ipcRenderer.invoke('win:isFullScreen'),
+  },
+
+  /**
+   * The presenter window runs in its own renderer, so it gets its own copy of
+   * this bridge. It may read state and ask the audience window to navigate, but
+   * it deliberately has no path to the filesystem.
+   */
+  presenter: {
+    open: () => ipcRenderer.invoke('presenter:open'),
+    close: () => ipcRenderer.invoke('presenter:close'),
+    isOpen: () => ipcRenderer.invoke('presenter:isOpen'),
+    state: (s) => ipcRenderer.invoke('presenter:state', s),
+    tick: (elapsedMs) => ipcRenderer.invoke('presenter:tick', { elapsedMs }),
+    nav: (delta) => ipcRenderer.invoke('presenter:nav', delta),
+    resetTimer: () => ipcRenderer.invoke('presenter:resetTimer'),
+    onState: (cb) => {
+      const h = (_e, s) => cb(s);
+      ipcRenderer.on('presenter:state', h);
+      return () => ipcRenderer.removeListener('presenter:state', h);
+    },
+    onTick: (cb) => {
+      const h = (_e, s) => cb(s);
+      ipcRenderer.on('presenter:tick', h);
+      return () => ipcRenderer.removeListener('presenter:tick', h);
+    },
+    onExit: (cb) => {
+      const h = () => cb();
+      ipcRenderer.on('presenter:exit', h);
+      return () => ipcRenderer.removeListener('presenter:exit', h);
+    },
   },
 });

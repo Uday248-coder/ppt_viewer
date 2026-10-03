@@ -1,7 +1,7 @@
 {
   "name": "ppt-viewer",
   "productName": "PPT Viewer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Standalone offline PowerPoint deck viewer for Windows",
   "author": "Uday248-coder",
   "license": "MIT",

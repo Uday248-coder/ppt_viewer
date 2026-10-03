@@ -4,7 +4,8 @@ const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const { EventEmitter } = require('events');
-const { SlideCache, KINDS, THUMB_W, THUMB_H, FULL_W, FULL_H } = require('./cache');
+const { SlideCache, KINDS, RENDER_VERSION, THUMB_W, FULL_W } = require('./cache');
+const mediaReader = require('./media');
 
 const HRESULT_TAIL = /\s*\|?\s*(exception from )?hresult:?\s*0x[0-9a-f]+\s*$/i;
 
@@ -65,6 +66,12 @@ function fail(err) {
  * The COM worker holds exactly one PowerPoint presentation, so every operation
  * funnels through _ensureOpen(), which reopens the deck if the worker's current
  * presentation has drifted to a different file.
+ *
+ * Work is also split into two lanes. Anything the user is waiting on runs
+ * interactively; filling the rest of the deck in the background runs at low
+ * priority and is dropped the moment an interactive request arrives. Without
+ * that split, a background prefill of a 300-slide deck would put a minute of
+ * queued renders in front of a simple arrow-key press.
  */
 class DeckService extends EventEmitter {
   constructor(comBridge, cache, settings) {
@@ -73,14 +80,31 @@ class DeckService extends EventEmitter {
     this.cache = cache;
     this.settings = settings;
     this.current = null; // { path, key, info }
-    this._chain = Promise.resolve();
+    this._interactive = Promise.resolve();
+    this._background = Promise.resolve();
+    this._backgroundRunning = false;
+    this._backgroundAbort = null;
+    this.com.on('worker-event', (ev) => {
+      if (ev && ev.phase === 'slides') this.emit('render-progress', ev);
+    });
   }
 
-  /** Serialises deck-level operations so concurrent IPC calls cannot interleave. */
+  /** Runs ahead of background work; nothing prefill-related can delay it. */
   _serial(fn) {
     const run = () => fn().catch((e) => { throw fail(e); });
-    const chained = this._chain.then(run, run);
-    this._chain = chained.then(
+    const chained = this._interactive.then(run, run);
+    this._interactive = chained.then(
+      () => {},
+      () => {}
+    );
+    return chained;
+  }
+
+  /** Yields to the interactive lane between every unit of work. */
+  _backgroundSerial(fn) {
+    const run = () => this._serial(fn);
+    const chained = this._background.then(run, run);
+    this._background = chained.then(
       () => {},
       () => {}
     );
@@ -120,17 +144,32 @@ class DeckService extends EventEmitter {
 
       // Fully cached: serve from disk, never touch PowerPoint.
       if (preferCache && status.level === 'full' && status.meta) {
-        this.current = null;
-        return {
-          path: abs,
-          key,
-          fromCache: true,
-          info: status.meta,
-          cached: status,
-        };
+        const mediaOk = await this.cache.mediaReady(key, status.meta.mediaFiles);
+        if (mediaOk) {
+          this.current = null;
+          return {
+            path: abs,
+            key,
+            fromCache: true,
+            info: status.meta,
+            cached: status,
+          };
+        }
       }
 
       this.emit('deck-opening', { path: abs, name: path.basename(abs) });
+
+      // Extracted before the deck is opened: PowerPoint locks any file it has
+      // open, and the OOXML package cannot be read through that lock. Doing it
+      // in this order also means the media is ready by the time the first slide
+      // is drawn, so a video starts on the right frame.
+      const previous = status.meta;
+      const media = await this._extractMedia(abs, key, {
+        slides: previous ? previous.mediaSlides : null,
+        files: previous ? previous.mediaFiles : null,
+        error: previous ? previous.mediaError : null,
+      });
+
       const opened = await this._ensureOpen(abs, key);
       const info = opened.info;
 
@@ -143,10 +182,16 @@ class DeckService extends EventEmitter {
         title: info.title || '',
         slides: info.slides || [],
         cachedAt: Date.now(),
+        renderVersion: RENDER_VERSION,
         sourceMtimeMs: Math.floor(st.mtimeMs),
         sourceSize: st.size,
-        thumbSize: { w: THUMB_W, h: THUMB_H },
-        fullSize: { w: FULL_W, h: FULL_H },
+        // Recorded per deck: the long edge is fixed but the other dimension
+        // follows the deck's own shape, so these are not global constants.
+        thumbSize: previous?.thumbSize || { long: THUMB_W },
+        fullSize: previous?.fullSize || { long: FULL_W },
+        mediaSlides: media.slides,
+        mediaFiles: media.files,
+        mediaError: media.error || null,
       };
       await this.cache.writeMeta(key, meta);
 
@@ -154,7 +199,77 @@ class DeckService extends EventEmitter {
     });
   }
 
-  /** Renders any missing thumbnails. Cheap (~5ms/slide), so this is done eagerly. */
+  /**
+   * Unpacks embedded media and works out which slide each file belongs to.
+   *
+   * Runs through the worker but needs no PowerPoint, and any earlier result is
+   * kept when the media is already unpacked and intact.
+   */
+  async _extractMedia(absPath, key, previous) {
+    const alreadyHave = previous && previous.slides && previous.files;
+    if (alreadyHave && (await this.cache.mediaReady(key, previous.files))) {
+      return { slides: previous.slides, files: previous.files, error: previous.error || null };
+    }
+
+    const scratch = path.join(os.tmpdir(), `pptv-media-${process.pid}-${key}`);
+    const copy = path.join(scratch, 'source.pptx');
+    try {
+      // PowerPoint locks any deck it has open, and the package cannot be read
+      // through that lock. Extracting before the deck is opened is the normal
+      // path; the throwaway copy is the fallback for when it is already open.
+      let res;
+      try {
+        res = await this.com.request(
+          'unpackMedia',
+          { file: absPath, outDir: scratch },
+          { timeout: 300_000 }
+        );
+      } catch (direct) {
+        res = await this.com.request(
+          'unpackMedia',
+          { file: absPath, outDir: scratch, viaCopy: copy },
+          { timeout: 300_000 }
+        );
+      }
+      const parsed = await mediaReader.readUnpacked(scratch);
+
+      const dest = this.cache.mediaDir(key);
+      await fsp.mkdir(dest, { recursive: true });
+      const files = [];
+      for (const m of parsed.media) {
+        await fsp.copyFile(path.join(scratch, 'media', m.name), this.cache.mediaPath(key, m.name));
+        files.push({ name: m.name, kind: m.kind, bytes: m.bytes });
+      }
+
+      const slides = {};
+      for (const [index, items] of parsed.slides) {
+        slides[index] = items.map((it) => ({
+          kind: it.kind,
+          file: it.file,
+          name: it.name || '',
+          background: !!it.background,
+          rect: it.rect,
+          rotation: it.rotation,
+          autoplay: !!it.autoplay,
+          loop: !!it.loop,
+          startMs: it.startMs || 0,
+          endMs: it.endMs || null,
+        }));
+      }
+      return { slides, files, error: null };
+    } catch (e) {
+      // A deck whose media cannot be unpacked is still perfectly viewable as
+      // stills, so this is never fatal - but it is worth saying out loud,
+      // because "the video did not play" with no explanation is maddening.
+      const message = humanizeError(e);
+      this.emit('media-warning', { path: absPath, message });
+      return { slides: {}, files: [], error: message };
+    } finally {
+      await fsp.rm(scratch, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /** Renders any missing thumbnails. Cheap, so this is done eagerly. */
   async ensureThumbs(absPath, { onProgress } = {}) {
     return this._serial(async () => {
       const abs = path.resolve(absPath);
@@ -172,22 +287,35 @@ class DeckService extends EventEmitter {
       const tmp = path.join(os.tmpdir(), `pptv-thumb-${process.pid}-${key}`);
       const res = await this.com.request(
         'exportDir',
-        { dir: tmp, width: THUMB_W, height: THUMB_H },
+        { dir: tmp, long: THUMB_W },
         { timeout: 300_000 }
       );
       await this.cache.ingest(KINDS.THUMB, res.files, key);
       await fsp.rm(tmp, { recursive: true, force: true });
       onProgress?.({ done: meta.slideCount, total: meta.slideCount });
 
-      return { key, thumbs: meta.slideCount, slideCount: meta.slideCount, rendered: meta.slideCount, info: cur.info };
+      return {
+        key,
+        thumbs: meta.slideCount,
+        slideCount: meta.slideCount,
+        rendered: meta.slideCount,
+        info: cur.info,
+        thumbSize: { width: res.width, height: res.height },
+      };
     });
   }
 
   /**
    * Renders specific slides at full resolution. Only missing slides are rendered,
    * so revisiting a deck costs nothing.
+   *
+   * One worker call covers the whole burst: asking for slides one at a time
+   * puts a protocol round trip in front of the user for each one.
    */
   async ensureSlides(absPath, indices, { onProgress } = {}) {
+    const wanted = [...new Set((indices || []).map(Number).filter((n) => n >= 1))];
+    if (!wanted.length) return { key: null, rendered: 0, alreadyHave: 0 };
+
     return this._serial(async () => {
       const abs = path.resolve(absPath);
       const st = await this._statOf(abs);
@@ -195,27 +323,32 @@ class DeckService extends EventEmitter {
       const status = await this.cache.status(key);
       if (!status.meta) throw new Error('Deck metadata is not cached; open the deck first.');
 
-      const wanted = [...new Set(indices.map(Number).filter((n) => n >= 1 && n <= status.meta.slideCount))];
+      const inRange = wanted.filter((n) => n <= status.meta.slideCount);
       const missing = [];
-      for (const i of wanted) {
+      for (const i of inRange) {
         if (!(await this.cache.exists(KINDS.FULL, key, i))) missing.push(i);
       }
-      if (!missing.length) return { key, rendered: 0, alreadyHave: wanted.length };
+      if (!missing.length) {
+        return { key, rendered: 0, alreadyHave: inRange.length };
+      }
 
       await this._ensureOpen(abs, key);
       const tmpDir = path.join(os.tmpdir(), `pptv-full-${process.pid}-${key}`);
-      await fsp.mkdir(tmpDir, { recursive: true });
+      const res = await this.com.request(
+        'exportSlides',
+        { dir: tmpDir, long: FULL_W, indices: missing },
+        { timeout: 600_000 }
+      );
+      const written = await this.cache.ingest(KINDS.FULL, res.files, key);
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      onProgress?.({ done: missing.length, total: missing.length });
 
-      let done = 0;
-      for (const i of missing) {
-        const src = path.join(tmpDir, `s${i}.png`);
-        await this.com.request('exportSlide', { index: i, file: src, width: FULL_W, height: FULL_H });
-        await this.cache.writeSlide(KINDS.FULL, key, i, src);
-        done += 1;
-        onProgress?.({ done, total: missing.length, index: i });
-      }
-      await fsp.rm(tmpDir, { recursive: true, force: true });
-      return { key, rendered: done, alreadyHave: wanted.length - done };
+      return {
+        key,
+        rendered: written.length,
+        alreadyHave: inRange.length - missing.length,
+        fullSize: { width: res.width, height: res.height },
+      };
     });
   }
 
@@ -237,14 +370,85 @@ class DeckService extends EventEmitter {
 
       await this._ensureOpen(abs, key);
       const tmp = path.join(os.tmpdir(), `pptv-bulk-${process.pid}-${key}`);
-      const res = await this.com.request('exportDir', { dir: tmp, width: FULL_W, height: FULL_H }, { timeout: 900_000 });
+      const res = await this.com.request('exportDir', { dir: tmp, long: FULL_W }, { timeout: 900_000 });
       // exportDir renders everything; ignore any already-cached slides when counting.
-      await this.cache.ingest(KINDS.FULL, res.files, key);
-      await fsp.rm(tmp, { recursive: true, force: true });
+      const written = await this.cache.ingest(KINDS.FULL, res.files, key);
+      await fsp.rm(tmp, { recursive: true, force: true }).catch(() => {});
       onProgress?.({ done: total, total });
 
-      return { key, rendered: res.files.length, total, complete: true };
+      return { key, rendered: written.length, total, complete: true };
     });
+  }
+
+  /**
+   * Quietly renders the rest of the deck in the background, so jumping to any
+   * slide later is instant and the deck becomes fully offline-capable without
+   * the user asking for it.
+   *
+   * Runs one small batch at a time and re-checks the abort flag between them, so
+   * closing the deck or pressing an arrow key stops it promptly.
+   */
+  async prefill(absPath, { batchSize = 12, onProgress } = {}) {
+    const abs = path.resolve(absPath);
+    const st = await this._statOf(abs);
+    const key = SlideCache.keyFor(abs, st);
+    const status = await this.cache.status(key);
+    if (!status.meta) return { key, rendered: 0, total: 0, stopped: true };
+
+    const total = status.meta.slideCount;
+    const missing = [];
+    for (let i = 1; i <= total; i++) {
+      if (!(await this.cache.exists(KINDS.FULL, key, i))) missing.push(i);
+    }
+    if (!missing.length) return { key, rendered: 0, total, complete: true };
+
+    const abort = { stopped: false };
+    this._backgroundAbort = abort;
+    this._backgroundRunning = true;
+    let done = 0;
+
+    try {
+      for (let at = 0; at < missing.length && !abort.stopped; at += batchSize) {
+        if (abort.stopped || this._backgroundAbort !== abort) break;
+        const batch = missing.slice(at, at + batchSize);
+        const r = await this._backgroundSerial(async () => {
+          // The user may have opened a different deck while this was queued.
+          if (abort.stopped) return 0;
+          if (this.current && this.current.path !== abs) return 0;
+          return (await this._renderBatch(abs, key, batch)).length;
+        });
+        done += r;
+        onProgress?.({ done, total: missing.length, running: !abort.stopped });
+      }
+    } catch {
+      // A background failure is not worth interrupting the user over; the
+      // slides it would have produced simply stay uncached.
+    }
+
+    if (this._backgroundAbort === abort) {
+      this._backgroundRunning = false;
+      this._backgroundAbort = null;
+    }
+    return { key, rendered: done, total: missing.length, stopped: abort.stopped, complete: done >= missing.length };
+  }
+
+  /** Renders one batch of full-resolution slides, returning what was written. */
+  async _renderBatch(absPath, key, indices) {
+    await this._ensureOpen(absPath, key);
+    const tmpDir = path.join(os.tmpdir(), `pptv-prefill-${process.pid}-${key}`);
+    const res = await this.com.request(
+      'exportSlides',
+      { dir: tmpDir, long: FULL_W, indices },
+      { timeout: 600_000 }
+    );
+    const written = await this.cache.ingest(KINDS.FULL, res.files, key);
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    return written;
+  }
+
+  stopPrefill() {
+    if (this._backgroundAbort) this._backgroundAbort.stopped = true;
+    return this._backgroundRunning;
   }
 
   async exportPdf(absPath, outFile) {
@@ -261,6 +465,7 @@ class DeckService extends EventEmitter {
   }
 
   async close() {
+    this.stopPrefill();
     return this._serial(async () => {
       if (this.current) {
         try { await this.com.request('close'); } catch { }
@@ -271,6 +476,7 @@ class DeckService extends EventEmitter {
 
   /** Releases the PowerPoint process - used when the app goes idle. */
   async shutdown() {
+    this.stopPrefill();
     await this.close();
     await this.com.stop();
   }

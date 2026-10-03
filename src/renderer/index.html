@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src pptv: data: blob:; font-src 'self'; connect-src 'none'" />
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src pptv: data: blob:; media-src pptv: blob:; font-src 'self'; connect-src 'none'" />
   <title>PPT Viewer</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -30,8 +30,10 @@
       <div class="library-body">
         <aside class="sidebar">
           <div class="side-head">
-            <span>Folders</span>
+            <span>Repositories</span>
           </div>
+          <ul id="repo-list" class="repo-list"></ul>
+          <div class="side-head side-head--spaced"><span>Folders</span></div>
           <ul id="root-list" class="root-list"></ul>
           <div class="side-head side-head--spaced"><span>Recents</span></div>
           <ul id="recent-list" class="recent-list"></ul>
@@ -49,7 +51,7 @@
 
         <main class="deck-pane">
           <div class="deck-pane-head">
-            <div id="deck-count" class="deck-count">No folders added</div>
+            <nav id="crumbs" class="crumbs" aria-label="Current scope"></nav>
             <div class="sort-wrap">
               <label for="sort">Sort</label>
               <select id="sort">
@@ -70,6 +72,7 @@
           <p>Choose a folder and I'll find every <code>.ppt</code>, <code>.pptx</code> and <code>.ppsx</code> inside it — including subfolders. Everything stays on this machine.</p>
           <button id="btn-add-folder-2" class="btn btn-primary btn-lg">Choose folder…</button>
           <p class="empty-hint">Or drop a folder anywhere on this window</p>
+          <div class="empty-version">Version <span id="empty-version">—</span></div>
         </div>
       </div>
     </section>
@@ -85,8 +88,11 @@
         <div class="topbar-actions">
           <button id="btn-grid" class="btn" title="All slides (G)">Slides</button>
           <button id="btn-notes" class="btn" title="Toggle speaker notes (N)">Notes</button>
+          <span id="media-badge" class="media-badge" hidden></span>
+          <button id="btn-media-mute" class="btn btn-icon" title="Mute media" hidden>🔊</button>
           <button id="btn-cache" class="btn" title="Render every slide to cache for instant offline reopening">Cache deck</button>
           <button id="btn-pdf" class="btn" title="Export this deck as PDF">PDF</button>
+          <button id="btn-presenter" class="btn" title="Open the presenter window (S)">Presenter</button>
           <button id="btn-present" class="btn btn-primary" title="Start slideshow (F5)">Present</button>
         </div>
       </header>
@@ -95,6 +101,7 @@
         <div id="stage" class="stage">
           <div id="slide-wrap" class="slide-wrap">
             <img id="slide-img" class="slide-img" alt="" draggable="false" />
+            <div id="media-layer" class="media-layer"></div>
           </div>
           <div id="slide-spinner" class="slide-spinner" hidden><div class="spinner"></div></div>
           <div id="zoom-badge" class="zoom-badge" hidden>100%</div>
@@ -105,9 +112,11 @@
           <div class="notes-head">
             <span>Speaker notes</span>
             <span id="notes-slide-no" class="notes-no"></span>
+            <button id="btn-notes-collapse" class="notes-collapse" title="Hide notes (N)" aria-label="Hide notes">›</button>
           </div>
           <div id="notes-body" class="notes-body"></div>
         </aside>
+        <button id="notes-tab" class="notes-tab" hidden title="Show speaker notes (N)">Notes</button>
       </div>
 
       <footer class="filmstrip-wrap">
@@ -130,7 +139,10 @@
     <!-- ===================== PRESENT MODE ===================== -->
     <div id="present" class="present" hidden>
       <div id="present-stage" class="present-stage">
-        <img id="present-img" class="present-img" alt="" draggable="false" />
+        <div class="present-frame">
+          <img id="present-img" class="present-img" alt="" draggable="false" />
+          <div id="present-media" class="media-layer"></div>
+        </div>
       </div>
       <div id="present-notes" class="present-notes" hidden></div>
       <div id="present-bar" class="present-bar">
@@ -138,11 +150,13 @@
         <div class="present-meta">
           <span id="present-title"></span>
           <span id="present-counter"></span>
+          <span id="p-timer" class="p-timer" title="Elapsed time">0:00</span>
         </div>
         <div class="present-btns">
           <button id="p-prev" class="pbtn" title="Previous (←)">‹</button>
           <button id="p-grid" class="pbtn" title="All slides (G)">▦</button>
           <button id="p-notes" class="pbtn" title="Notes (N)">N</button>
+          <button id="p-mute" class="pbtn" title="Mute media">🔊</button>
           <button id="p-exit" class="pbtn" title="Exit (Esc)">✕</button>
           <button id="p-next" class="pbtn" title="Next (→)">›</button>
         </div>
